@@ -1,320 +1,20 @@
-import express from 'express';
-import multer from 'multer';
-import path from 'path';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
-import sharp from 'sharp';
-import xlsx from 'xlsx';
-import mammoth from 'mammoth';
-import archiver from 'archiver';
-import crypto from 'crypto';
-import { PDFDocument } from 'pdf-lib';
+import sys
+import re
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+with open(r"d:\Namsterreact\backend\server.js", "r", encoding="utf-8") as f:
+    text = f.read()
 
-import cors from 'cors';
+# Find the separator "// --- Auth + User Routes (Mock/In-memory Implementation) ---"
+sep = "// --- Auth + User Routes (Mock/In-memory Implementation) ---"
+parts = text.split(sep)
+if len(parts) != 2:
+    print("Separator not found or multiple found.")
+    sys.exit(1)
 
-const app = express();
-const port = process.env.PORT || 3001;
+top_code = parts[0]
 
-// Allow all origins (request origin reflection) for cross-domain clients including Google login flows.
-
-app.use((req, res, next) => {
-  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
-  res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
-  next();
-});
-
-app.use(cors({
-  origin: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
-  credentials: true,
-  preflightContinue: false,
-  optionsSuccessStatus: 204
-}));
-
-// Health check for Render
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Namster API' });
-});
-
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
-
-const publicDir = path.join(__dirname, 'public');
-const uploadsDir = path.join(__dirname, 'uploads');
-const workDir = path.join(__dirname, 'work');
-
-for (const d of [publicDir, uploadsDir, workDir]) {
-  if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
-}
-
-app.use(express.static(publicDir));
-
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadsDir);
-  },
-  filename: function (req, file, cb) {
-    const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, unique + '-' + file.originalname.replace(/\s+/g, '_'));
-  },
-});
-const upload = multer({
-  storage,
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
-});
-
-const sessions = new Map();
-
-function newSession() {
-  const id = crypto.randomUUID();
-  sessions.set(id, {
-    id,
-    createdAt: Date.now(),
-    modelPath: null,
-    listPath: null,
-    names: [],
-    cleanup: [],
-  });
-  return id;
-}
-
-function cleanupSession(id) {
-  const s = sessions.get(id);
-  if (!s) return;
-  for (const p of s.cleanup) {
-    try {
-      if (p && fs.existsSync(p)) fs.rmSync(p, { recursive: true, force: true });
-    } catch { }
-  }
-  sessions.delete(id);
-}
-
-function parseNamesFromText(text) {
-  const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
-  return lines.map(line => {
-    const parts = line.split('=');
-    if (parts.length >= 2) {
-      return {
-        name: parts[0].trim(),
-        table: parts.slice(1).join('=').trim()
-      };
-    }
-    const altParts = line.split(/[:\t]/);
-    if (altParts.length >= 2) {
-      return {
-        name: altParts[0].trim(),
-        table: altParts[1].trim()
-      };
-    }
-    return { name: line.trim(), table: '' };
-  }).filter(item => {
-    const norm = item.name.toLowerCase().replace(/\s+/g, '');
-    return norm !== 'liste' && norm !== '';
-  });
-}
-
-async function extractNamesFromFile(filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-
-  if (ext === '.csv') {
-    return parseNamesFromText(fs.readFileSync(filePath, 'utf8'));
-  }
-
-  if (ext === '.xlsx' || ext === '.xls') {
-    const wb = xlsx.readFile(filePath);
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const data = xlsx.utils.sheet_to_json(ws, { header: 1 });
-    return data.map(row => {
-      let name = String(row[0] || '').trim();
-      let table = String(row[1] || '').trim();
-      if (!table && name.includes('=')) {
-        const parts = name.split('=');
-        name = parts[0].trim();
-        table = parts[1].trim();
-      } else if (!table && name.includes(':')) {
-        const parts = name.split(':');
-        name = parts[0].trim();
-        table = parts[1].trim();
-      }
-      return { name, table };
-    }).filter(row => row.name);
-  }
-
-  if (ext === '.docx') {
-    const { value } = await mammoth.extractRawText({ path: filePath });
-    return parseNamesFromText(value || '');
-  }
-
-  if (ext === '.pdf') {
-    try {
-      const dataBuffer = fs.readFileSync(filePath);
-      const { default: pdfParse } = await import('pdf-parse');
-      const data = await pdfParse(dataBuffer);
-      return parseNamesFromText(data.text || '');
-    } catch (e) {
-      console.warn('PDF parsing failed:', e?.message);
-      return [];
-    }
-  }
-
-  try {
-    return parseNamesFromText(fs.readFileSync(filePath, 'utf8'));
-  } catch {
-    return [];
-  }
-}
-
-function buildSVGOverlay(elements, width, height) {
-  const allowedFonts = new Set([
-    'Alex Brush',
-    'Great Vibes',
-    'Dancing Script',
-    'Playfair Display',
-    'Bodoni Moda',
-    'Cinzel',
-    'Cormorant Garamond',
-    'Pinyon Script',
-    'Rochester',
-    'Sacramento',
-    'Brush Script MT',
-    'Monotype Corsiva',
-    'Lucida Calligraphy',
-    'Segoe Script',
-    'Gabriola',
-    'Palace Script MT',
-    'Edwardian Script ITC',
-    'Kunstler Script',
-    'Vladimir Script',
-    'Vivaldi',
-    'Garamond',
-    'Book Antiqua'
-  ]);
-  const safeStr = (s) => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const textItems = elements.map(el => {
-    const requestedFont = (el.fontFamily || 'Arial').trim();
-    const ff = allowedFonts.has(requestedFont) ? requestedFont : 'Arial';
-    const fsPx = Number(el.fontSize) || 48;
-    const fill = el.color || '#000000';
-    const fw = el.fontWeight || 'normal';
-    const fst = el.fontStyle || 'normal';
-    const td = el.textDecoration || 'none';
-    return `<text x="${el.x}" y="${el.y}" style="font-family: '${ff}'; font-size: ${fsPx}px; font-weight: ${fw}; font-style: ${fst}; text-decoration: ${td}; fill: ${fill}; dominant-baseline: hanging;">${safeStr(el.text)}</text>`;
-  }).join('\n');
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
-  ${textItems}
-</svg>`;
-}
-
-async function composeImageWithElements(modelPath, outPath, elements) {
-  const img = sharp(fs.readFileSync(modelPath));
-  const meta = await img.metadata();
-  const width = meta.width || 2000;
-  const height = meta.height || 1000;
-  const svg = buildSVGOverlay(elements, width, height);
-  const buffer = await img.composite([{ input: Buffer.from(svg), top: 0, left: 0 }]).png().toBuffer();
-  await fs.promises.writeFile(outPath, buffer);
-}
-
-app.post('/api/upload', upload.fields([
-  { name: 'model', maxCount: 1 },
-  { name: 'list', maxCount: 1 },
-]), async (req, res) => {
-  try {
-    const sid = newSession();
-    const s = sessions.get(sid);
-    const model = req.files['model']?.[0];
-    const list = req.files['list']?.[0];
-    if (!model || !list) return res.status(400).json({ error: 'Model image and list file are required.' });
-    s.modelPath = model.path;
-    s.listPath = list.path;
-    s.cleanup.push(model.path, list.path);
-    const names = await extractNamesFromFile(s.listPath);
-    s.names = names;
-    res.json({ sessionId: sid, namesTotal: names.length });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'Upload failed.' });
-  }
-});
-
-app.post('/api/test', express.json(), async (req, res) => {
-  try {
-    const { sessionId, x, y, tx, ty, useTable, fontFamily, fontSize, color, fontWeight, fontStyle, textDecoration } = req.body || {};
-    const s = sessions.get(sessionId);
-    if (!s) return res.status(400).json({ error: 'Invalid session' });
-    const firstEntry = s.names[0] || { name: 'INVITE TEST', table: '01' };
-    const elements = [{ text: firstEntry.name, x: Number(x) || 100, y: Number(y) || 100, fontFamily, fontSize, color, fontWeight, fontStyle, textDecoration }];
-    if (useTable && tx !== undefined && ty !== undefined) {
-      elements.push({ text: firstEntry.table || '01', x: Number(tx) || 100, y: Number(ty) || 100, fontFamily, fontSize, color, fontWeight, fontStyle, textDecoration });
-    }
-    const outDir = path.join(workDir, sessionId);
-    if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
-    const outPath = path.join(outDir, 'test.png');
-    await composeImageWithElements(s.modelPath, outPath, elements);
-    s.cleanup.push(outDir);
-    const data = fs.readFileSync(outPath);
-    res.json({ preview: 'data:image/png;base64,' + data.toString('base64') });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'Test render failed.' });
-  }
-});
-
-app.post('/api/generate', express.json(), async (req, res) => {
-  try {
-    const { sessionId, x, y, tx, ty, useTable, fontFamily, fontSize, color, fontWeight, fontStyle, textDecoration, offset, limit } = req.body || {};
-    const s = sessions.get(sessionId);
-    if (!s) return res.status(400).json({ error: 'Invalid session' });
-    const outDir = path.join(workDir, sessionId, 'all');
-    if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
-    const start = Math.max(0, Number(offset) || 0);
-    const batchSize = Math.min(50, Number(limit) || 50);
-    const endExclusive = Math.min(s.names.length, start + batchSize);
-    for (let idx = start; idx < endExclusive; idx++) {
-      const entry = s.names[idx];
-      const filename = `${String(idx + 1).padStart(3, '0')}-${entry.name.replace(/[^a-z0-9_-]+/gi, '_')}.png`;
-      const outPath = path.join(outDir, filename);
-      const elements = [{ text: entry.name, x: Number(x) || 100, y: Number(y) || 100, fontFamily, fontSize, color, fontWeight, fontStyle, textDecoration }];
-      if (useTable && tx !== undefined && ty !== undefined) {
-        elements.push({ text: entry.table, x: Number(tx) || 100, y: Number(ty) || 100, fontFamily, fontSize, color, fontWeight, fontStyle, textDecoration });
-      }
-      await composeImageWithElements(s.modelPath, outPath, elements);
-    }
-    const zipPath = path.join(workDir, sessionId, 'invitations.zip');
-    await new Promise((resolve, reject) => {
-      const output = fs.createWriteStream(zipPath);
-      const archive = archiver('zip', { zlib: { level: 9 } });
-      output.on('close', resolve);
-      archive.on('error', reject);
-      archive.pipe(output);
-      archive.directory(outDir, false);
-      archive.finalize();
-    });
-    s.cleanup.push(path.join(workDir, sessionId));
-    res.json({ downloadUrl: `/api/download/${sessionId}`, processed: endExclusive - start, total: s.names.length });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'Generation failed.' });
-  }
-});
-
-app.get('/api/download/:sid', (req, res) => {
-  const sid = req.params.sid;
-  const s = sessions.get(sid);
-  if (!s) return res.status(400).json({ error: 'Invalid session' });
-  const zipPath = path.join(workDir, sid, 'invitations.zip');
-  if (!fs.existsSync(zipPath)) return res.status(404).json({ error: 'ZIP not found' });
-  res.download(zipPath, 'invitations.zip', (err) => {
-    cleanupSession(sid);
-  });
-});
-
-// --- Auth + User Routes (MongoDB Implementation) ---
+# Now we append the Mongoose logic and rewritten routes
+mongo_logic = """// --- Auth + User Routes (MongoDB Implementation) ---
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 dotenv.config();
@@ -333,21 +33,10 @@ const userSchema = new mongoose.Schema({
   role: { type: String, default: 'user' },
   isPremium: { type: Boolean, default: false },
   isBanned: { type: Boolean, default: false },
-  avatar: { type: String, default: '' },
-  favoriteTemplateIds: { type: [Number], default: [] }
+  avatar: { type: String, default: '' }
 }, { timestamps: true });
 
 const User = mongoose.model('User', userSchema);
-
-const savedTemplateSchema = new mongoose.Schema({
-  id: { type: String, required: true, unique: true },
-  userId: { type: String, required: true },
-  name: { type: String, required: true },
-  templateId: { type: Number, required: true },
-  customizationData: { type: mongoose.Schema.Types.Mixed, default: {} }
-}, { timestamps: true });
-
-const SavedTemplate = mongoose.model('SavedTemplate', savedTemplateSchema);
 
 const historySchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true },
@@ -396,7 +85,6 @@ async function getPublicUser(user) {
     role: user.role || 'user',
     isPremium: Boolean(user.isPremium),
     avatar: user.avatar || '',
-    favoriteTemplateIds: Array.isArray(user.favoriteTemplateIds) ? user.favoriteTemplateIds : [],
     history: history || []
   };
 }
@@ -426,7 +114,7 @@ function issueToken(userId) {
 
 function extractInvitationsCount(entry) {
   if (!entry || typeof entry.details !== 'string') return 0;
-  const match = entry.details.match(/(\d+)/);
+  const match = entry.details.match(/(\\d+)/);
   return match ? Number(match[1]) || 0 : 0;
 }
 
@@ -633,80 +321,6 @@ app.post('/api/user/history', authRequired, async (req, res) => {
   res.status(201).json(entry);
 });
 
-// --- Saved templates (personnalisées nommées) ---
-app.get('/api/user/saved-templates', authRequired, async (req, res) => {
-  const list = await SavedTemplate.find({ userId: req.user.id }).sort({ updatedAt: -1 }).lean();
-  res.json(list);
-});
-
-app.post('/api/user/saved-templates', authRequired, async (req, res) => {
-  const { name, templateId, customizationData } = req.body || {};
-  if (!name || typeof name !== 'string' || name.trim() === '') {
-    return res.status(400).json({ error: 'Name is required' });
-  }
-  if (templateId == null || Number.isNaN(Number(templateId))) {
-    return res.status(400).json({ error: 'templateId is required' });
-  }
-  const id = crypto.randomUUID();
-  const doc = new SavedTemplate({
-    id,
-    userId: req.user.id,
-    name: String(name).trim(),
-    templateId: Number(templateId),
-    customizationData: customizationData && typeof customizationData === 'object' ? customizationData : {}
-  });
-  await doc.save();
-  res.status(201).json(doc);
-});
-
-app.patch('/api/user/saved-templates/:id', authRequired, async (req, res) => {
-  const doc = await SavedTemplate.findOne({ id: req.params.id, userId: req.user.id });
-  if (!doc) return res.status(404).json({ error: 'Saved template not found' });
-  const { name } = req.body || {};
-  if (typeof name === 'string' && name.trim() !== '') {
-    doc.name = name.trim();
-    await doc.save();
-  }
-  res.json(doc);
-});
-
-app.delete('/api/user/saved-templates/:id', authRequired, async (req, res) => {
-  const result = await SavedTemplate.findOneAndDelete({ id: req.params.id, userId: req.user.id });
-  if (!result) return res.status(404).json({ error: 'Saved template not found' });
-  res.json({ success: true });
-});
-
-// --- Favoris (template de base) ---
-app.get('/api/user/favorites', authRequired, async (req, res) => {
-  const user = await User.findOne({ id: req.user.id }).lean();
-  const ids = Array.isArray(user?.favoriteTemplateIds) ? user.favoriteTemplateIds : [];
-  res.json({ favoriteTemplateIds: ids });
-});
-
-app.post('/api/user/favorites', authRequired, async (req, res) => {
-  const { templateId } = req.body || {};
-  const tid = Number(templateId);
-  if (Number.isNaN(tid)) return res.status(400).json({ error: 'templateId is required' });
-  const user = await User.findOne({ id: req.user.id });
-  if (!user.favoriteTemplateIds) user.favoriteTemplateIds = [];
-  if (!user.favoriteTemplateIds.includes(tid)) {
-    user.favoriteTemplateIds.push(tid);
-    await user.save();
-  }
-  res.json({ favoriteTemplateIds: user.favoriteTemplateIds });
-});
-
-app.delete('/api/user/favorites/:templateId', authRequired, async (req, res) => {
-  const tid = Number(req.params.templateId);
-  if (Number.isNaN(tid)) return res.status(400).json({ error: 'Invalid templateId' });
-  const user = await User.findOne({ id: req.user.id });
-  if (user.favoriteTemplateIds) {
-    user.favoriteTemplateIds = user.favoriteTemplateIds.filter(id => id !== tid);
-    await user.save();
-  }
-  res.json({ favoriteTemplateIds: user.favoriteTemplateIds || [] });
-});
-
 app.get('/api/contact/user/:userId', authRequired, async (req, res) => {
   const isAdmin = (req.user?.role || 'user') === 'admin';
   if (!isAdmin && String(req.user.id) !== String(req.params.userId)) {
@@ -806,7 +420,6 @@ app.delete('/api/admin/users/:id', authRequired, adminRequired, async (req, res)
   if (!removed) return res.status(404).json({ error: 'User not found' });
 
   await History.deleteMany({ userId: targetId });
-  await SavedTemplate.deleteMany({ userId: targetId });
   for (const [token, uid] of activeTokens.entries()) {
     if (String(uid) === String(targetId)) activeTokens.delete(token);
   }
@@ -881,3 +494,10 @@ app.post('/api/contact', express.json(), async (req, res) => {
 app.listen(port, () => {
   console.log(`Namster Premium server running at http://localhost:${port}`);
 });
+"""
+
+import codecs
+with codecs.open(r"d:\Namsterreact\backend\server.js", "w", "utf-8") as f:
+    f.write(top_code + mongo_logic)
+
+print("Patch successful!")
