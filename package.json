@@ -9,6 +9,9 @@
         "dev": "node server.js",
         "build": "echo 'No build step needed'"
     },
+    "engines": {
+        "node": ">=18.0.0"
+    },
     "dependencies": {
         "archiver": "^7.0.1",
         "cors": "^2.8.5",

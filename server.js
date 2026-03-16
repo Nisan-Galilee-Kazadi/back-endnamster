@@ -609,7 +609,11 @@ app.put('/api/auth/profile', authRequired, async (req, res) => {
   res.json(await getPublicUser(req.user));
 });
 
-app.put('/api/user/profile/avatar', authRequired, upload.single('avatar'), async (req, res) => {
+    res.status(500).json({ error: 'Failed to process image' });
+  }
+});
+
+app.put('/api/auth/profile/avatar', authRequired, upload.single('avatar'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
     const buffer = await sharp(req.file.path)
@@ -622,6 +626,7 @@ app.put('/api/user/profile/avatar', authRequired, upload.single('avatar'), async
     try { fs.unlinkSync(req.file.path); } catch (e) { }
     res.json({ avatar: base64Avatar });
   } catch (error) {
+    console.error('Avatar upload error:', error);
     res.status(500).json({ error: 'Failed to process image' });
   }
 });
