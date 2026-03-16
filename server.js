@@ -609,6 +609,23 @@ app.put('/api/auth/profile', authRequired, async (req, res) => {
   res.json(await getPublicUser(req.user));
 });
 
+app.put('/api/user/profile/avatar', authRequired, upload.single('avatar'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const buffer = await sharp(req.file.path)
+      .resize(200, 200)
+      .toFormat('webp')
+      .toBuffer();
+    const base64Avatar = `data:image/webp;base64,${buffer.toString('base64')}`;
+    req.user.avatar = base64Avatar;
+    await req.user.save();
+    try { fs.unlinkSync(req.file.path); } catch (e) { }
+    res.json({ avatar: base64Avatar });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to process image' });
+  }
+});
+
 app.get('/api/user/stats', authRequired, async (req, res) => {
   res.json(await buildUserStats(req.user.id));
 });
